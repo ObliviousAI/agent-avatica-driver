@@ -6,7 +6,7 @@
 settings.xml
 .classpath.txt
 .fullclasspath.txt
-
+.idea
 # eclipse
 .project
 .buildpath
