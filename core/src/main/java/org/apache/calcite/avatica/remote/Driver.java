@@ -29,6 +29,7 @@ import org.slf4j.LoggerFactory;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -37,6 +38,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
+import java.util.UUID;
+import java.util.prefs.Preferences;
+import java.net.InetAddress;
 
 /**
  * Avatica Remote JDBC driver.
@@ -172,6 +176,19 @@ public class Driver extends UnregisteredDriver {
     long failoverSleepTime = 0;
     do {
       long startTime = System.currentTimeMillis();
+      // Get the device details to create device signature at the backend
+      String os = System.getProperty("os.name", "unknown");
+      String machine_uuid = getAndSetUuid();
+      String hostAddress;
+      try {
+        hostAddress = InetAddress.getLocalHost().getHostAddress();
+      } catch (UnknownHostException e) {
+        hostAddress = "unknown";
+      }
+      info.put("os", os);
+      info.put("uuid", machine_uuid);
+      info.put("ip", hostAddress);
+
       AvaticaConnection conn = (AvaticaConnection) super.connect(url, info);
       if (conn == null) {
         // It's not an url for our driver
@@ -231,6 +248,28 @@ public class Driver extends UnregisteredDriver {
     }
 
     return serializationType;
+  }
+
+  private String getAndSetUuid() {
+    // Set or get the UUID from java preferences
+    String uuid = null;
+    uuid = Preferences.userNodeForPackage(Driver.class).get("uuid", null);
+    // Get the last access time from java preferences
+    long lastTime = Preferences.userNodeForPackage(Driver.class).getLong("lastTime", 0);
+    // If the uuid is not set or the last time is more than 25 minutes ago, set the uuid
+    if (uuid == null || (System.currentTimeMillis() - lastTime) > 1500000) {
+      uuid = UUID.randomUUID().toString();
+      Preferences.userNodeForPackage(Driver.class).put("uuid", uuid);
+    }
+    // Update the last time
+    Preferences.userNodeForPackage(Driver.class).putLong("lastTime", System.currentTimeMillis());
+    // Flush the preferences
+    try {
+      Preferences.userNodeForPackage(Driver.class).flush();
+    } catch (Exception e) {
+      return uuid;  // If the flush fails, return the uuid anyway. Uuid gets automatically flushed or maybe regenerated again on next access
+    }
+    return uuid;
   }
 }
 
