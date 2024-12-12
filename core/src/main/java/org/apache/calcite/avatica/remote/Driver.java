@@ -24,12 +24,29 @@ import org.apache.calcite.avatica.DriverVersion;
 import org.apache.calcite.avatica.Meta;
 import org.apache.calcite.avatica.UnregisteredDriver;
 
+import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.http.ClassicHttpResponse;
+import org.apache.hc.core5.http.ContentType;
+import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.HttpException;
+import org.apache.hc.core5.http.io.HttpClientResponseHandler;
+import org.apache.hc.core5.http.io.entity.StringEntity;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.UnknownHostException;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -40,7 +57,7 @@ import java.util.Locale;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.prefs.Preferences;
-import java.net.InetAddress;
+
 
 /**
  * Avatica Remote JDBC driver.
@@ -171,6 +188,7 @@ public class Driver extends UnregisteredDriver {
   }
   @Override public Connection connect(String url, Properties info)
       throws SQLException {
+    String authBaseUrl = "https://api-agent-qa-new.staging.antigranular.com";
     int retries = 0;
     int currentRetry = 0;
     long failoverSleepTime = 0;
@@ -179,15 +197,82 @@ public class Driver extends UnregisteredDriver {
       // Get the device details to create device signature at the backend
       String os = System.getProperty("os.name", "unknown");
       String machine_uuid = getAndSetUuid();
-      String hostAddress;
-      try {
-        hostAddress = InetAddress.getLocalHost().getHostAddress();
-      } catch (UnknownHostException e) {
-        hostAddress = "unknown";
+      String apiKey = info.getProperty("apiKey");
+      String client_type = "sql";
+      JSONObject jsonPayload = new JSONObject();
+      jsonPayload.put("apikey", apiKey);
+      jsonPayload.put("machine_uuid", machine_uuid);
+      jsonPayload.put("client", client_type);
+      jsonPayload.put("os", os);
+
+      String targetUrl = authBaseUrl + "/jupyter/login/request";
+
+      HttpPost postRequest = new HttpPost(targetUrl);
+      postRequest.setHeader("Content-Type", "application/json");
+      postRequest.setEntity(new StringEntity(jsonPayload.toString(), ContentType.APPLICATION_JSON));
+
+      String authToken;
+      String refreshToken;
+      // Response handler that processes the server's response and extracts tokens
+      HttpClientResponseHandler<String[]> responseHandler =
+          new HttpClientResponseHandler<String[]>() {
+        @Override
+        public String[] handleResponse(
+            ClassicHttpResponse response
+        ) throws HttpException, IOException {
+          int statusCode = response.getCode();
+          if (statusCode == 200) {
+            HttpEntity entity = response.getEntity();
+            if (entity == null) {
+              throw new RuntimeException("No response entity returned.");
+            }
+
+            try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8))) {
+              boolean seenFirst = false;
+              String line;
+              while ((line = reader.readLine()) != null) {
+                if (line.startsWith("data: ")) {
+                  // The first "data: " line might be a starter line; skip it
+                  if (!seenFirst) {
+                    seenFirst = true;
+                    continue;
+                  }
+                  String jsonData = line.substring(6).trim(); // Remove "data: "
+                  // Concatenate all the lines to form the JSON string
+
+                  try {
+                    JsonNode tokenNode = extractToken(jsonData);
+                    if (!"approved".equals(tokenNode.get("approval_status").asText())) {
+                      throw new RuntimeException("Token request not approved.");
+                    }
+                    String token = tokenNode.get("access_token").asText();
+                    String refreshToken = tokenNode.get("refresh_token").asText();
+                    return new String[]{token, refreshToken};
+                  } catch (Exception e) {
+                    throw new RuntimeException("Error parsing token JSON", e);
+                  }
+                }
+              }
+              throw new RuntimeException("Failed to login. No valid data found in response.");
+            }
+          } else {
+            throw new RuntimeException("Failed to retrieve auth token. Status code: " + statusCode);
+          }
+        }
+      };
+
+      try (CloseableHttpClient client = HttpClients.createDefault()) {
+        String[] tokens = client.execute(postRequest, responseHandler);
+        authToken = tokens[0];
+        refreshToken = tokens[1];
+      } catch (Exception e) {
+        throw new RuntimeException("Error retrieving auth token", e);
       }
-      info.put("os", os);
-      info.put("uuid", machine_uuid);
-      info.put("ip", hostAddress);
+
+      // Put auth token and refresh token in the info properties
+      info.put("token", authToken);
+      info.put("refresh_token", refreshToken);
 
       AvaticaConnection conn = (AvaticaConnection) super.connect(url, info);
       if (conn == null) {
@@ -253,23 +338,37 @@ public class Driver extends UnregisteredDriver {
   private String getAndSetUuid() {
     // Set or get the UUID from java preferences
     String uuid = null;
-    uuid = Preferences.userNodeForPackage(Driver.class).get("uuid", null);
+    Preferences prefs = Preferences.userRoot().node("agent/client");
+    uuid = prefs.get("uuid", null);
     // Get the last access time from java preferences
-    long lastTime = Preferences.userNodeForPackage(Driver.class).getLong("lastTime", 0);
+    long lastTime = prefs
+        .getLong("lastTime", 0);
     // If the uuid is not set or the last time is more than 25 minutes ago, set the uuid
     if (uuid == null || (System.currentTimeMillis() - lastTime) > 1500000) {
       uuid = UUID.randomUUID().toString();
-      Preferences.userNodeForPackage(Driver.class).put("uuid", uuid);
+      prefs.put("uuid", uuid);
     }
     // Update the last time
-    Preferences.userNodeForPackage(Driver.class).putLong("lastTime", System.currentTimeMillis());
+    prefs.putLong("lastTime", System.currentTimeMillis());
     // Flush the preferences
     try {
-      Preferences.userNodeForPackage(Driver.class).flush();
+      prefs.flush();
     } catch (Exception e) {
       return uuid;  // If the flush fails, return the uuid anyway. Uuid gets automatically flushed or maybe regenerated again on next access
     }
     return uuid;
+  }
+
+  // Method to extract token from the jsonData
+  private JsonNode extractToken(String jsonData) {
+    try {
+      ObjectMapper mapper = new ObjectMapper();
+      return mapper.readTree(jsonData);
+    } catch (JsonProcessingException e) {
+      throw new RuntimeException(e);
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to extract token from response.", e);
+    }
   }
 }
 

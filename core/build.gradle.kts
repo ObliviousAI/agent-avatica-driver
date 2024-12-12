@@ -38,6 +38,8 @@ dependencies {
     implementation("org.apache.httpcomponents.client5:httpclient5")
     implementation("org.apache.httpcomponents.core5:httpcore5")
     implementation("org.slf4j:slf4j-api")
+    implementation("org.json:json:20231013")
+
     testImplementation("junit:junit")
     testImplementation("org.mockito:mockito-core")
     testImplementation("org.mockito:mockito-inline")
