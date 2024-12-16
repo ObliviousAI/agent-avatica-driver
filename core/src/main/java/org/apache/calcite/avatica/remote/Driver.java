@@ -241,7 +241,7 @@ public class Driver extends UnregisteredDriver {
       if (apiKey == null) { // If apiKey is not present in the URL, get it from the properties
         apiKey = info.getProperty("apiKey");
       }
-      String client_type = "sql";
+      String client_type = "avatica";
       JSONObject jsonPayload = new JSONObject();
       jsonPayload.put("apikey", apiKey);
       jsonPayload.put("machine_uuid", machine_uuid);
