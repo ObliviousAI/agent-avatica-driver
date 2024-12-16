@@ -49,13 +49,7 @@ import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
-import java.util.Locale;
-import java.util.Properties;
-import java.util.UUID;
+import java.util.*;
 import java.util.prefs.Preferences;
 
 
@@ -83,7 +77,8 @@ public class Driver extends UnregisteredDriver {
     PROTOBUF
   }
 
-  @Override protected String getConnectStringPrefix() {
+  @Override
+  protected String getConnectStringPrefix() {
     return CONNECT_STRING_PREFIX;
   }
 
@@ -97,14 +92,16 @@ public class Driver extends UnregisteredDriver {
         "unknown version");
   }
 
-  @Override protected Collection<ConnectionProperty> getConnectionProperties() {
+  @Override
+  protected Collection<ConnectionProperty> getConnectionProperties() {
     final List<ConnectionProperty> list = new ArrayList<>();
     Collections.addAll(list, BuiltInConnectionProperty.values());
     Collections.addAll(list, AvaticaRemoteConnectionProperty.values());
     return list;
   }
 
-  @Override public Meta createMeta(AvaticaConnection connection) {
+  @Override
+  public Meta createMeta(AvaticaConnection connection) {
     final ConnectionConfig config = connection.config();
 
     // Perform the login and launch the renewal thread if necessary
@@ -132,7 +129,7 @@ public class Driver extends UnregisteredDriver {
    * Creates a {@link Service} with the given {@link AvaticaConnection} and configuration.
    *
    * @param connection The {@link AvaticaConnection} to use.
-   * @param config Configuration properties
+   * @param config     Configuration properties
    * @return A Service implementation.
    */
   Service createService(AvaticaConnection connection, ConnectionConfig config) {
@@ -165,7 +162,7 @@ public class Driver extends UnregisteredDriver {
    * Creates the HTTP client that communicates with the Avatica server.
    *
    * @param connection The {@link AvaticaConnection}.
-   * @param config The configuration.
+   * @param config     The configuration.
    * @return An {@link AvaticaHttpClient} implementation.
    */
   AvaticaHttpClient getHttpClient(AvaticaConnection connection, ConnectionConfig config) {
@@ -186,9 +183,53 @@ public class Driver extends UnregisteredDriver {
 
     return httpClientFactory.getClient(url, config, connection.getKerberosConnection());
   }
-  @Override public Connection connect(String url, Properties info)
+
+  @Override
+  public Connection connect(String url, Properties info)
       throws SQLException {
-    String authBaseUrl = "https://api-agent-qa-new.staging.antigranular.com";
+    String consoleUrl = extractUrlFromConnectString(url);
+    String apiKey = extractApiKeyFromUrl(consoleUrl);
+
+
+    String authBaseUrl;
+    String avaticaUrl;
+    // Make a get request to consoleUrl/config/client to get the authBaseUrl and avaticaUrl
+    try {
+      String endPoint;
+      if (consoleUrl.endsWith("/")) {
+        endPoint = "config/client";
+      } else {
+        endPoint = "/config/client";
+      }
+      URL urlObj = new URL(consoleUrl + endPoint);
+      HttpURLConnection connection = (HttpURLConnection) urlObj.openConnection();
+      connection.setRequestMethod("GET");
+      connection.setRequestProperty("Content-Type", "application/json");
+      connection.setConnectTimeout(5000);
+      connection.setReadTimeout(5000);
+
+      int responseCode = connection.getResponseCode();
+      if (responseCode != HttpURLConnection.HTTP_OK) {
+        throw new RuntimeException("Failed to get client configuration. Response code: " + responseCode);
+      }
+
+      BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8));
+      StringBuilder response = new StringBuilder();
+      String line;
+      while ((line = reader.readLine()) != null) {
+        response.append(line);
+      }
+      reader.close();
+
+      JSONObject jsonResponse = new JSONObject(response.toString());
+      authBaseUrl = jsonResponse.getString("AGENT_CONSOLE_URL");
+      avaticaUrl = jsonResponse.getString("AVATICA_URL");
+    } catch (Exception e) {
+      throw new SQLException("Failed to get client configuration. Console not reachable", e);
+    }
+
+    url = replaceUrlInConnectString(avaticaUrl);
+
     int retries = 0;
     int currentRetry = 0;
     long failoverSleepTime = 0;
@@ -197,13 +238,16 @@ public class Driver extends UnregisteredDriver {
       // Get the device details to create device signature at the backend
       String os = System.getProperty("os.name", "unknown");
       String machine_uuid = getAndSetUuid();
-      String apiKey = info.getProperty("apiKey");
+      if (apiKey == null) { // If apiKey is not present in the URL, get it from the properties
+        apiKey = info.getProperty("apiKey");
+      }
       String client_type = "sql";
       JSONObject jsonPayload = new JSONObject();
       jsonPayload.put("apikey", apiKey);
       jsonPayload.put("machine_uuid", machine_uuid);
       jsonPayload.put("client", client_type);
       jsonPayload.put("os", os);
+      jsonPayload.put("nic_id", getNICId());
 
       String targetUrl = authBaseUrl + "/jupyter/login/request";
 
@@ -216,51 +260,51 @@ public class Driver extends UnregisteredDriver {
       // Response handler that processes the server's response and extracts tokens
       HttpClientResponseHandler<String[]> responseHandler =
           new HttpClientResponseHandler<String[]>() {
-        @Override
-        public String[] handleResponse(
-            ClassicHttpResponse response
-        ) throws HttpException, IOException {
-          int statusCode = response.getCode();
-          if (statusCode == 200) {
-            HttpEntity entity = response.getEntity();
-            if (entity == null) {
-              throw new RuntimeException("No response entity returned.");
-            }
-
-            try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8))) {
-              boolean seenFirst = false;
-              String line;
-              while ((line = reader.readLine()) != null) {
-                if (line.startsWith("data: ")) {
-                  // The first "data: " line might be a starter line; skip it
-                  if (!seenFirst) {
-                    seenFirst = true;
-                    continue;
-                  }
-                  String jsonData = line.substring(6).trim(); // Remove "data: "
-                  // Concatenate all the lines to form the JSON string
-
-                  try {
-                    JsonNode tokenNode = extractToken(jsonData);
-                    if (!"approved".equals(tokenNode.get("approval_status").asText())) {
-                      throw new RuntimeException("Token request not approved.");
-                    }
-                    String token = tokenNode.get("access_token").asText();
-                    String refreshToken = tokenNode.get("refresh_token").asText();
-                    return new String[]{token, refreshToken};
-                  } catch (Exception e) {
-                    throw new RuntimeException("Error parsing token JSON", e);
-                  }
+            @Override
+            public String[] handleResponse(
+                ClassicHttpResponse response
+            ) throws HttpException, IOException {
+              int statusCode = response.getCode();
+              if (statusCode == 200) {
+                HttpEntity entity = response.getEntity();
+                if (entity == null) {
+                  throw new RuntimeException("No response entity returned.");
                 }
+
+                try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8))) {
+                  boolean seenFirst = false;
+                  String line;
+                  while ((line = reader.readLine()) != null) {
+                    if (line.startsWith("data: ")) {
+                      // The first "data: " line might be a starter line; skip it
+                      if (!seenFirst) {
+                        seenFirst = true;
+                        continue;
+                      }
+                      String jsonData = line.substring(6).trim(); // Remove "data: "
+                      // Concatenate all the lines to form the JSON string
+
+                      try {
+                        JsonNode tokenNode = extractToken(jsonData);
+                        if (!"approved".equals(tokenNode.get("approval_status").asText())) {
+                          throw new RuntimeException("Token request not approved.");
+                        }
+                        String token = tokenNode.get("access_token").asText();
+                        String refreshToken = tokenNode.get("refresh_token").asText();
+                        return new String[]{token, refreshToken};
+                      } catch (Exception e) {
+                        throw new RuntimeException("Error parsing token JSON", e);
+                      }
+                    }
+                  }
+                  throw new RuntimeException("Failed to login. No valid data found in response.");
+                }
+              } else {
+                throw new RuntimeException("Failed to retrieve auth token. Status code: " + statusCode);
               }
-              throw new RuntimeException("Failed to login. No valid data found in response.");
             }
-          } else {
-            throw new RuntimeException("Failed to retrieve auth token. Status code: " + statusCode);
-          }
-        }
-      };
+          };
 
       try (CloseableHttpClient client = HttpClients.createDefault()) {
         String[] tokens = client.execute(postRequest, responseHandler);
@@ -337,7 +381,7 @@ public class Driver extends UnregisteredDriver {
 
   private String getAndSetUuid() {
     // Set or get the UUID from java preferences
-    String uuid = null;
+    String uuid;
     Preferences prefs = Preferences.userRoot().node("agent/client");
     uuid = prefs.get("uuid", null);
     // Get the last access time from java preferences
@@ -370,6 +414,57 @@ public class Driver extends UnregisteredDriver {
       throw new RuntimeException("Failed to extract token from response.", e);
     }
   }
-}
 
+  private String extractUrlFromConnectString(String connectString) {
+    if (connectString.startsWith(CONNECT_STRING_PREFIX)) {
+      return connectString.substring(CONNECT_STRING_PREFIX.length() + 4);
+    }
+    return connectString;
+  }
+
+  private String replaceUrlInConnectString(String url) {
+    return CONNECT_STRING_PREFIX + "url=" + url;
+  }
+
+  private String extractApiKeyFromUrl(String url) {
+    try {
+      URL urlObj = new URL(url);
+      String query = urlObj.getQuery();
+      if (query == null) {    // If no parameters are present in the URL
+        return null;
+      }
+      String[] queryParts = query.split("&");
+      for (String queryPart : queryParts) {
+        String[] keyValue = queryPart.split("=");
+        if (keyValue[0].equals("apiKey")) {
+          return keyValue[1];
+        }
+      }
+    } catch (MalformedURLException e) {
+      throw new RuntimeException(e);
+    }
+    return null;
+  }
+
+  // Get NIC Id from the system. Returns first not null nic id of all interfaces
+  private String getNICId() {
+    try {
+      Enumeration<NetworkInterface> networkInterfaces = NetworkInterface.getNetworkInterfaces();
+      while (networkInterfaces.hasMoreElements()) {
+        NetworkInterface networkInterface = networkInterfaces.nextElement();
+        byte[] mac = networkInterface.getHardwareAddress();
+        if (mac != null) {
+          StringBuilder sb = new StringBuilder();
+          for (int i = 0; i < mac.length; i++) {
+            sb.append(String.format(Locale.US ,"%02X%s", mac[i], (i < mac.length - 1) ? "-" : ""));
+          }
+          return sb.toString();
+        }
+      }
+    } catch (SocketException e) {
+      throw new RuntimeException(e);
+    }
+    return null;
+  }
+}
 // End Driver.java
