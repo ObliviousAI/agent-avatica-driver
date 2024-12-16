@@ -189,7 +189,7 @@ public class Driver extends UnregisteredDriver {
       throws SQLException {
     String consoleUrl = extractUrlFromConnectString(url);
     String apiKey = extractApiKeyFromUrl(consoleUrl);
-
+    consoleUrl = removeParamFromConsoleUrl(consoleUrl);
 
     String authBaseUrl;
     String avaticaUrl;
@@ -387,8 +387,8 @@ public class Driver extends UnregisteredDriver {
     // Get the last access time from java preferences
     long lastTime = prefs
         .getLong("lastTime", 0);
-    // If the uuid is not set or the last time is more than 25 minutes ago, set the uuid
-    if (uuid == null || (System.currentTimeMillis() - lastTime) > 1500000) {
+    // If the uuid is not set or the last time is more than 1 minute ago, set the uuid
+    if (uuid == null || (System.currentTimeMillis() - lastTime) > 60000) {
       uuid = UUID.randomUUID().toString();
       prefs.put("uuid", uuid);
     }
@@ -444,6 +444,15 @@ public class Driver extends UnregisteredDriver {
       throw new RuntimeException(e);
     }
     return null;
+  }
+
+  private String removeParamFromConsoleUrl(String url) {
+    try {
+      URL urlObj = new URL(url);
+      return urlObj.getProtocol() + "://" + urlObj.getHost() + ":" + urlObj.getPort();
+    } catch (MalformedURLException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   // Get NIC Id from the system. Returns first not null nic id of all interfaces
