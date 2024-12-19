@@ -241,11 +241,9 @@ public class Driver extends UnregisteredDriver {
       if (apiKey == null) { // If apiKey is not present in the URL, get it from the properties
         apiKey = info.getProperty("apiKey");
       }
-      String client_type = "avatica";
       JSONObject jsonPayload = new JSONObject();
       jsonPayload.put("apikey", apiKey);
       jsonPayload.put("machine_uuid", machine_uuid);
-      jsonPayload.put("client", client_type);
       jsonPayload.put("os", os);
       jsonPayload.put("nic_id", getNICId());
 
@@ -471,9 +469,10 @@ public class Driver extends UnregisteredDriver {
         }
       }
     } catch (SocketException e) {
-      throw new RuntimeException(e);
+      // Return 0 mac address as default if there is an exception
+      return "00-00-00-00-00-00";
     }
-    return null;
+    return "00-00-00-00-00-00";
   }
 }
 // End Driver.java
